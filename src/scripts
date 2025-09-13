@@ -1,0 +1,102 @@
+import requests
+import os
+from dotenv import load_dotenv
+import sys
+
+sys.path.insert(0, 'src')
+from database.connection import get_db_client
+
+load_dotenv()
+
+def extract_gameweek_from_round(round_str):
+    if not round_str:
+        return None
+    if "Regular Season" in round_str and " - " in round_str:
+        parts = round_str.split(" - ")
+        if len(parts) >= 2:
+            try:
+                return int(parts[-1])
+            except ValueError:
+                return None
+    return None
+
+def scrape_current_season():
+    api_key = os.getenv('RAPID_API_KEY_FOOTBALL')
+    db = get_db_client()
+    
+    print("Scraping 2025 season fixtures...")
+    
+    response = requests.get(
+        'https://v3.football.api-sports.io/fixtures',
+        headers={'x-apisports-key': api_key},
+        params={'league': 39, 'season': 2025},
+        timeout=30
+    )
+    
+    if response.status_code != 200:
+        print(f"API Error: {response.status_code}")
+        return False
+    
+    data = response.json()
+    fixtures_data = []
+    
+    for fixture_info in data.get('response', []):
+        fixture = fixture_info['fixture']
+        league = fixture_info['league'] 
+        teams = fixture_info['teams']
+        goals = fixture_info['goals']
+        
+        round_str = league.get('round', '')
+        gameweek = extract_gameweek_from_round(round_str)
+        
+        fixtures_data.append({
+            'id': fixture['id'],
+            'league_id': 39,
+            'season': 2025,
+            'round': round_str,
+            'gameweek': gameweek,
+            'home_team_id': teams['home']['id'],
+            'away_team_id': teams['away']['id'],
+            'date': fixture.get('date'),
+            'status_short': fixture['status']['short'],
+            'status_long': fixture['status']['long'],
+            'home_score': goals.get('home'),
+            'away_score': goals.get('away')
+        })
+    
+    print(f"Got {len(fixtures_data)} fixtures for 2025 season")
+    
+    # Check gameweeks
+    gameweeks = {}
+    for f in fixtures_data:
+        gw = f['gameweek']
+        if gw:
+            gameweeks[gw] = gameweeks.get(gw, 0) + 1
+    
+    print(f"Gameweeks: {sorted(gameweeks.keys())}")
+    
+    # Find current gameweek
+    from datetime import datetime
+    now = datetime.now()
+    
+    current_gw = None
+    for f in fixtures_data:
+        if f['date']:
+            fixture_date = datetime.fromisoformat(f['date'].replace('Z', ''))
+            if fixture_date > now:
+                current_gw = f['gameweek']
+                break
+    
+    print(f"Current/Next gameweek: {current_gw}")
+    
+    # Store in database
+    try:
+        result = db.table("fixtures").insert(fixtures_data).execute()
+        print(f"SUCCESS: Stored {len(fixtures_data)} fixtures for 2025 season")
+        return True
+    except Exception as e:
+        print(f"Database error: {e}")
+        return False
+
+if __name__ == "__main__":
+    scrape_current_season()

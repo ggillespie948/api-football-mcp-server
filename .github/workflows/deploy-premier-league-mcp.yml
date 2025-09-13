@@ -1,0 +1,69 @@
+name: Deploy Premier League MCP Server
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run tests
+      run: |
+        python tests/test_enhanced_functions.py
+        
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/premier-league-mcp-server:latest
+          ghcr.io/${{ github.repository_owner }}/premier-league-mcp-server:${{ github.sha }}
+        
+    - name: Setup SSH for deployment
+      uses: shimataro/ssh-key-action@v2
+      with:
+        key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        known_hosts: ${{ secrets.KNOWN_HOSTS }}
+        
+    - name: Deploy to VPS
+      run: |
+        ssh -p 22 ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} '
+          docker pull ghcr.io/${{ github.repository_owner }}/premier-league-mcp-server:latest
+          docker stop premier-league-mcp || true
+          docker rm premier-league-mcp || true
+          docker run -d \
+            --name premier-league-mcp \
+            --restart unless-stopped \
+            -p 5000:5000 \
+            -e SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+            -e SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+            -e RAPID_API_KEY_FOOTBALL="${{ secrets.RAPID_API_KEY_FOOTBALL }}" \
+            -e DEFAULT_REQUEST_MODE="${{ secrets.DEFAULT_REQUEST_MODE }}" \
+            -e PREMIER_LEAGUE_ID="${{ secrets.PREMIER_LEAGUE_ID }}" \
+            -e DEFAULT_SEASON="${{ secrets.DEFAULT_SEASON }}" \
+            ghcr.io/${{ github.repository_owner }}/premier-league-mcp-server:latest
+        '

@@ -1,21 +1,36 @@
-# Use an official Python runtime as a parent image
-FROM python:3.10-slim
+# Enhanced Premier League MCP Server with Supabase Caching
+FROM python:3.11-slim
 
-# Set the working directory in the container
-WORKDIR /soccer-mcp-server
+# Set working directory
+WORKDIR /app
 
-# Copy the current directory contents into the container
-COPY . /soccer-mcp-server
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install any necessary dependencies
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose the port that your app will run on
+# Copy application code
+COPY . .
+
+# Create non-root user for security
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Expose MCP server port
 EXPOSE 5000
 
-# Run the server when the container launches
-CMD ["python", "soccer_server.py"]
+# Environment variables
+ENV PYTHONPATH=/app/src
+ENV ENVIRONMENT=production
 
-# docker build -t nba_server .
-# docker run -p 4000:5000 nba_server
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "from src.database.connection import test_db_connection; exit(0 if test_db_connection() else 1)" || exit 1
+
+# Run the enhanced MCP server
+CMD ["python", "soccer_server.py"]
 
