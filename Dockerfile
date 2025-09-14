@@ -31,6 +31,6 @@ ENV ENVIRONMENT=production
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "from src.database.connection import test_db_connection; exit(0 if test_db_connection() else 1)" || exit 1
 
-# Run the enhanced MCP server
-CMD ["python", "soccer_server.py"]
+# Run the standalone server (no MCP dependency)
+CMD ["python", "standalone_server.py"]
 
