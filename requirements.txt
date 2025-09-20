@@ -3,8 +3,8 @@ pandas>=2.0.0
 pydantic>=2.0.0
 pydantic-settings>=2.8.0
 
-# MCP Server
-fastmcp>=0.1.0
+# MCP Server (try different packages)
+mcp-server>=0.1.0
 
 # Supabase integration
 supabase>=2.0.0

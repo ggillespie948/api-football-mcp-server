@@ -1814,6 +1814,355 @@ def get_request_mode_status() -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"get_request_mode_status error: {str(e)}"}
 
+# ================================
+# PHASE 2: SQUAD, H2H, AND FORM TOOLS
+# ================================
+
+@mcp.tool()
+def get_team_squad(team_name: str, season: int = None) -> Dict[str, Any]:
+    """Get team's current squad/roster with player details.
+    
+    Args:
+        team_name (str): The team's name (e.g., "Arsenal", "Liverpool").
+        season (int): The season (defaults to current season).
+        
+    Returns:
+        Dict[str, Any]: Team squad with player information.
+    """
+    try:
+        if not db or not settings:
+            return {"error": "Enhanced caching not available"}
+        
+        season = season or settings.DEFAULT_SEASON
+        
+        if len(team_name.strip()) < 3:
+            return {"error": "Team name must be at least 3 characters long"}
+        
+        # Find team
+        teams = db.table("teams").select("*").ilike("name", f"%{team_name}%").execute()
+        
+        if not teams.data:
+            return {"error": f"No team found matching '{team_name}'"}
+        
+        team = teams.data[0]
+        team_id = team["id"]
+        
+        # Get squad from cache
+        squad_data = db.table("team_squads").select("*, players(*)").eq("team_id", team_id).eq("season", season).eq("is_active", True).execute()
+        
+        if squad_data.data:
+            return {
+                "team": team,
+                "season": season,
+                "squad": squad_data.data,
+                "squad_size": len(squad_data.data),
+                "source": "supabase_cache"
+            }
+        else:
+            return {
+                "team": team,
+                "season": season,
+                "message": "No squad data available - needs to be scraped",
+                "source": "cache_miss"
+            }
+            
+    except Exception as e:
+        return {"error": f"get_team_squad error: {str(e)}"}
+
+@mcp.tool()
+def get_team_last_5_results(team_name: str, season: int = None) -> Dict[str, Any]:
+    """Get team's last 5 match results and current form.
+    
+    Args:
+        team_name (str): The team's name (e.g., "Arsenal", "Liverpool").
+        season (int): The season (defaults to current season).
+        
+    Returns:
+        Dict[str, Any]: Last 5 results with form analysis.
+    """
+    try:
+        if not db or not settings:
+            return {"error": "Enhanced caching not available"}
+        
+        season = season or settings.DEFAULT_SEASON
+        
+        if len(team_name.strip()) < 3:
+            return {"error": "Team name must be at least 3 characters long"}
+        
+        # Find team
+        teams = db.table("teams").select("*").ilike("name", f"%{team_name}%").execute()
+        
+        if not teams.data:
+            return {"error": f"No team found matching '{team_name}'"}
+        
+        team = teams.data[0]
+        team_id = team["id"]
+        
+        # Get last 5 completed fixtures for this team
+        fixtures = db.table("fixtures").select("*").eq("league_id", settings.PREMIER_LEAGUE_ID).eq("season", season).eq("status_short", "FT").or_(f"home_team_id.eq.{team_id},away_team_id.eq.{team_id}").order("date", desc=True).limit(5).execute()
+        
+        if not fixtures.data:
+            return {"error": "No completed fixtures found for this team"}
+        
+        form = ""
+        last_5_results = []
+        
+        for fixture in fixtures.data:
+            is_home = fixture["home_team_id"] == team_id
+            
+            if is_home:
+                team_score = fixture["home_score"]
+                opponent_score = fixture["away_score"]
+                opponent_id = fixture["away_team_id"]
+            else:
+                team_score = fixture["away_score"]
+                opponent_score = fixture["home_score"]
+                opponent_id = fixture["home_team_id"]
+            
+            if team_score is None or opponent_score is None:
+                continue
+            
+            # Get opponent name
+            opponent = db.table("teams").select("name").eq("id", opponent_id).execute()
+            opponent_name = opponent.data[0]["name"] if opponent.data else "Unknown"
+            
+            # Determine result
+            if team_score > opponent_score:
+                result_char = "W"
+                result_text = "Win"
+            elif team_score < opponent_score:
+                result_char = "L"
+                result_text = "Loss"
+            else:
+                result_char = "D"
+                result_text = "Draw"
+            
+            form += result_char
+            
+            last_5_results.append({
+                "fixture_id": fixture["id"],
+                "date": fixture["date"],
+                "gameweek": fixture.get("gameweek"),
+                "opponent": opponent_name,
+                "is_home": is_home,
+                "score": f"{team_score}-{opponent_score}",
+                "result": result_text
+            })
+        
+        return {
+            "team": team,
+            "season": season,
+            "form": form,
+            "last_5_results": last_5_results,
+            "matches_count": len(last_5_results),
+            "source": "supabase_cache"
+        }
+        
+    except Exception as e:
+        return {"error": f"get_team_last_5_results error: {str(e)}"}
+
+@mcp.tool()
+def get_head_to_head(team1_name: str, team2_name: str, limit: int = 10) -> Dict[str, Any]:
+    """Get head-to-head record between two teams.
+    
+    Args:
+        team1_name (str): First team's name (e.g., "Arsenal").
+        team2_name (str): Second team's name (e.g., "Chelsea").
+        limit (int): Number of recent matches to include.
+        
+    Returns:
+        Dict[str, Any]: Head-to-head record and recent fixtures.
+    """
+    try:
+        if not db or not settings:
+            return {"error": "Enhanced caching not available"}
+        
+        if len(team1_name.strip()) < 3 or len(team2_name.strip()) < 3:
+            return {"error": "Team names must be at least 3 characters long"}
+        
+        # Find both teams
+        team1_result = db.table("teams").select("*").ilike("name", f"%{team1_name}%").execute()
+        team2_result = db.table("teams").select("*").ilike("name", f"%{team2_name}%").execute()
+        
+        if not team1_result.data:
+            return {"error": f"No team found matching '{team1_name}'"}
+        if not team2_result.data:
+            return {"error": f"No team found matching '{team2_name}'"}
+        
+        team1 = team1_result.data[0]
+        team2 = team2_result.data[0]
+        team1_id = team1["id"]
+        team2_id = team2["id"]
+        
+        # Get all fixtures between these teams
+        fixtures = db.table("fixtures").select("*").eq("league_id", settings.PREMIER_LEAGUE_ID).or_(
+            f"and(home_team_id.eq.{team1_id},away_team_id.eq.{team2_id}),and(home_team_id.eq.{team2_id},away_team_id.eq.{team1_id})"
+        ).order("date", desc=True).limit(limit).execute()
+        
+        if not fixtures.data:
+            return {"error": f"No fixtures found between {team1_name} and {team2_name}"}
+        
+        # Calculate H2H statistics
+        total_matches = 0
+        team1_wins = 0
+        team2_wins = 0
+        draws = 0
+        recent_fixtures = []
+        
+        for fixture in fixtures.data:
+            if fixture["home_score"] is None or fixture["away_score"] is None:
+                # Include upcoming fixtures in recent list
+                recent_fixtures.append({
+                    "fixture_id": fixture["id"],
+                    "date": fixture["date"],
+                    "gameweek": fixture.get("gameweek"),
+                    "home_team": team1["name"] if fixture["home_team_id"] == team1_id else team2["name"],
+                    "away_team": team2["name"] if fixture["away_team_id"] == team2_id else team1["name"],
+                    "score": "vs",
+                    "result": "Upcoming",
+                    "status": fixture["status_short"]
+                })
+                continue
+            
+            total_matches += 1
+            home_score = fixture["home_score"]
+            away_score = fixture["away_score"]
+            
+            # Determine winner
+            if fixture["home_team_id"] == team1_id:
+                # Team1 is home
+                if home_score > away_score:
+                    team1_wins += 1
+                    result = f"{team1_name} Win"
+                elif home_score < away_score:
+                    team2_wins += 1
+                    result = f"{team2_name} Win"
+                else:
+                    draws += 1
+                    result = "Draw"
+                
+                recent_fixtures.append({
+                    "fixture_id": fixture["id"],
+                    "date": fixture["date"],
+                    "gameweek": fixture.get("gameweek"),
+                    "home_team": team1_name,
+                    "away_team": team2_name,
+                    "score": f"{home_score}-{away_score}",
+                    "result": result,
+                    "status": fixture["status_short"]
+                })
+            else:
+                # Team2 is home
+                if home_score > away_score:
+                    team2_wins += 1
+                    result = f"{team2_name} Win"
+                elif home_score < away_score:
+                    team1_wins += 1
+                    result = f"{team1_name} Win"
+                else:
+                    draws += 1
+                    result = "Draw"
+                
+                recent_fixtures.append({
+                    "fixture_id": fixture["id"],
+                    "date": fixture["date"],
+                    "gameweek": fixture.get("gameweek"),
+                    "home_team": team2_name,
+                    "away_team": team1_name,
+                    "score": f"{home_score}-{away_score}",
+                    "result": result,
+                    "status": fixture["status_short"]
+                })
+        
+        return {
+            "team1": team1,
+            "team2": team2,
+            "h2h_summary": {
+                "total_matches": total_matches,
+                "team1_wins": team1_wins,
+                "team2_wins": team2_wins,
+                "draws": draws,
+                "team1_win_percentage": round((team1_wins / total_matches) * 100, 1) if total_matches > 0 else 0,
+                "team2_win_percentage": round((team2_wins / total_matches) * 100, 1) if total_matches > 0 else 0
+            },
+            "recent_fixtures": recent_fixtures,
+            "source": "supabase_cache"
+        }
+        
+    except Exception as e:
+        return {"error": f"get_head_to_head error: {str(e)}"}
+
+@mcp.tool()
+def get_premier_league_form_table(season: int = None) -> Dict[str, Any]:
+    """Get Premier League standings with last 5 games form.
+    
+    Args:
+        season (int): The season (defaults to current season).
+        
+    Returns:
+        Dict[str, Any]: Standings table with form indicators.
+    """
+    try:
+        if not db or not settings:
+            return {"error": "Enhanced caching not available"}
+        
+        season = season or settings.DEFAULT_SEASON
+        
+        # Get current standings
+        standings = db.table("standings").select("*").eq("league_id", settings.PREMIER_LEAGUE_ID).eq("season", season).order("rank").execute()
+        
+        if not standings.data:
+            return {"error": "No standings data available"}
+        
+        # Enhance with form data
+        enhanced_standings = []
+        
+        for standing in standings.data:
+            team_id = standing["team_id"]
+            
+            # Get team info
+            team_info = db.table("teams").select("*").eq("id", team_id).execute()
+            team_name = team_info.data[0]["name"] if team_info.data else "Unknown"
+            
+            # Calculate last 5 form
+            last_5_fixtures = db.table("fixtures").select("*").eq("league_id", settings.PREMIER_LEAGUE_ID).eq("season", season).eq("status_short", "FT").or_(f"home_team_id.eq.{team_id},away_team_id.eq.{team_id}").order("date", desc=True).limit(5).execute()
+            
+            form = ""
+            for fixture in last_5_fixtures.data:
+                is_home = fixture["home_team_id"] == team_id
+                
+                if is_home:
+                    team_score = fixture["home_score"]
+                    opponent_score = fixture["away_score"]
+                else:
+                    team_score = fixture["away_score"]
+                    opponent_score = fixture["home_score"]
+                
+                if team_score is not None and opponent_score is not None:
+                    if team_score > opponent_score:
+                        form += "W"
+                    elif team_score < opponent_score:
+                        form += "L"
+                    else:
+                        form += "D"
+            
+            enhanced_standing = standing.copy()
+            enhanced_standing["team_name"] = team_name
+            enhanced_standing["form"] = form
+            enhanced_standing["last_5_matches"] = len(last_5_fixtures.data)
+            
+            enhanced_standings.append(enhanced_standing)
+        
+        return {
+            "season": season,
+            "league_name": "Premier League",
+            "standings_with_form": enhanced_standings,
+            "source": "supabase_cache"
+        }
+        
+    except Exception as e:
+        return {"error": f"get_premier_league_form_table error: {str(e)}"}
+
 
 if __name__ == "__main__":
     try:
